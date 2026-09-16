@@ -1,0 +1,13 @@
+aiogram
+pydantic-settings
+asyncpg
+sqlalchemy
+sqlalchemy[asyncio]
+alembic
+pgvector
+pymupdf4llm
+sentence-transformers
+ollama
+redis
+arq
+aiohttp-socks

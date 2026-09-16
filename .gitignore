@@ -1,0 +1,27 @@
+# --- Виртуальное окружение ---
+.venv/
+venv/
+env/
+
+# --- Секреты (ГЛАВНОЕ!) ---
+.env
+.env.*
+*.pem
+*.key
+
+# --- Кэш Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+
+# --- IDE и OS ---
+.idea/
+.vscode/
+.DS_Store
+
+# --- Данные и временные файлы ---
+data/
+tg-bot-api-data/
+*.log
