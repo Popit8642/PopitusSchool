@@ -69,7 +69,7 @@ sudo apt install postgresql-16-pgvector redis-server \
 ### 2. Клонирование
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/PopitusSchool.git
+git clone https://github.com/Popit8642/PopitusSchool.git
 cd PopitusSchool
 python3 -m venv .venv
 source .venv/bin/activate
