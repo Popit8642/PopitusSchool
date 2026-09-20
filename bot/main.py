@@ -3,6 +3,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 
 from app.handlers import router
+from app.admin import admin_router
 from config import settings
 
 
@@ -16,6 +17,7 @@ def create_bot() -> Bot:
 async def main():
     bot = create_bot()
     dp = Dispatcher()
+    dp.include_router(admin_router)
     dp.include_router(router)
     print("[ON] | Бот запущен")
     await dp.start_polling(bot)

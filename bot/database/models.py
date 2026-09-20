@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Integer, Text, ForeignKey, DateTime, BigInteger
+from sqlalchemy import String, Integer, Text, ForeignKey, DateTime, BigInteger, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from pgvector.sqlalchemy import Vector
@@ -15,13 +15,13 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    first_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    active_broadcast: Mapped[bool] = mapped_column(default=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     documents: Mapped[list["Document"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
-
 
 class Document(Base):
     __tablename__ = "documents"
@@ -39,7 +39,6 @@ class Document(Base):
         back_populates="document", cascade="all, delete-orphan"
     )
 
-
 class Chunk(Base):
     __tablename__ = "chunks"
 
@@ -50,3 +49,10 @@ class Chunk(Base):
     embedding: Mapped[list[float]] = mapped_column(Vector(768))
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
+
+class Broadcast(Base):
+    __tablename__ = "broadcasts"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    message: Mapped[str] = mapped_column(nullable=False)
+    sent_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

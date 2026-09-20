@@ -1,4 +1,3 @@
-import os
 import tempfile
 
 from aiogram import Router, F
@@ -6,17 +5,16 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-
 from sqlalchemy import select
+
+router = Router()
 
 from database.database import async_session
 from database.models import User, Document
 from services.queue import enqueue_ingest
 from services.generator import generate_lesson
 from app.keyboards import main_menu, documents_keyboard
-
-
-router = Router()
+import database.functions as db
 
 
 class AddBook(StatesGroup):
@@ -29,52 +27,49 @@ class Lesson(StatesGroup):
     waiting_topic = State()
 
 
-# ─── Регистрация юзера ────────────────────────────────────────
-async def get_or_create_user(message: Message) -> User:
-    async with async_session() as session:
-        stmt = select(User).where(User.telegram_id == message.from_user.id)
-        user = (await session.execute(stmt)).scalar_one_or_none()
-
-        if user is None:
-            user = User(
-                telegram_id=message.from_user.id,
-                username=message.from_user.username,
-                first_name=message.from_user.first_name,
-            )
-            session.add(user)
-            await session.commit()
-            await session.refresh(user)
-        return user
-
-
-# ─── /start ───────────────────────────────────────────────────
+# ─── /start и регистрация юзера ───────────────────────────────────────────────────
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await get_or_create_user(message)
-    await message.answer(f"""Привет, {message.from_user.first_name}!\n"
-Я — AI-методист. Загрузи учебник в PDF, и я смогу генерировать по нему уроки.""",
+    await db.get_or_create_user(telegram_id=message.from_user.id, username=message.from_user.username)
+    await message.answer(f"""Приветствую, {message.from_user.first_name}!\n
+Я — AI-методист, ваш персональный помощник по составлениям уроков.""",
         reply_markup=main_menu,
     )
 
+# ─── О боте ─────────────────────────────────────────
+@router.message(F.text == "О боте")
+async def cmd_about(message: Message):
+    await message.answer("""Я — нейросеть, которая помогает учителям делать уроки. Не заменяю вас, а беру на себя рутину: вы читаете, объясняете, воспитываете, а я готовлю черновик урока по вашему учебнику.
+
+Как я работаю:
+Вы загружаете PDF-учебник — я его читаю, разбираю по страницам и запоминаю. Когда нужен урок по теме, я нахожу в учебнике нужные абзацы и составляю урок: цель, объяснение, пример, вопросы для проверки. В конце указываю страницы-источники, чтобы вы могли проверить.
+
+Что я умею:
+📥 Загружать учебники (даже сканы — распознаю текст с картинок)
+📚 Хранить их в вашем личном кабинете
+🧠 Составлять уроки по любой теме из учебника
+📖 Показывать, откуда взята информация
+
+Чего я не делаю:
+❌ Не выдумываю факты — только то, что есть в учебнике
+❌ Не отправляю ваши файлы в интернет — всё хранится на нашем сервере
+❌ Не заменяю учителя — я инструмент, а не человек
+
+Я основан на нейросети PopitusGPT v1.0""")
 
 # ─── Список учебников ─────────────────────────────────────────
 @router.message(F.text == "📚 Мои учебники")
 async def list_documents(message: Message, state: FSMContext):
     await state.clear()
-    user = await get_or_create_user(message)
-
-    async with async_session() as session:
-        stmt = select(Document).where(Document.user_id == user.id)
-        docs = (await session.execute(stmt)).scalars().all()
+    user = await db.get_or_create_user(telegram_id=message.from_user.id, username=message.from_user.username)
+    docs = await db.get_user_documents(user.id)
 
     if not docs:
-        await message.answer(
-            "У тебя пока нет учебников. Нажми «➕ Добавить учебник»."
-        )
+        await message.answer("У вас пока нет учебников. Нажмите «➕ Добавить учебник».")
         return
 
-    text = "📚 Твои учебники:\n\n" + "\n".join(
+    text = "📚 Ваши учебники:\n\n" + "\n".join(
         f"• {d.title}" + (f" — {d.grade}" if d.grade else "")
         for d in docs
     )
@@ -84,11 +79,11 @@ async def list_documents(message: Message, state: FSMContext):
 # ─── Добавить учебник ─────────────────────────────────────────
 @router.message(F.text == "➕ Добавить учебник")
 async def add_book_start(message: Message, state: FSMContext):
-    await get_or_create_user(message)
+    await db.get_or_create_user(message)
     await state.set_state(AddBook.waiting_meta)
-    await message.answer("""Напиши данные учебника через запятую:
-<b>Название, класс, авторы</b>\n
-Пример: <i>Алгебра, 7 класс, Прибауткин</i>""",
+    await message.answer("""Напишите данные учебника через запятую:
+Название, класс, авторы\n
+Пример: Алгебра, 7 класс, Юрий Клинских""",
     )
 
 
@@ -96,7 +91,7 @@ async def add_book_start(message: Message, state: FSMContext):
 async def add_book_meta(message: Message, state: FSMContext):
     parts = [p.strip() for p in message.text.split(",")]
     if len(parts) < 1:
-        await message.answer("Не понял. Напиши через запятую, например: Алгебра, 7 класс, Прибауткин")
+        await message.answer("Не понял. Напишите через запятую, например: Алгебра, 7 класс, Прибауткин")
         return
 
     title = parts[0]
@@ -106,7 +101,7 @@ async def add_book_meta(message: Message, state: FSMContext):
     await state.update_data(title=title, grade=grade, author=author)
     await state.set_state(AddBook.waiting_pdf)
     await message.answer(
-        "Теперь скинь PDF-файл учебника.\n"
+        "Теперь скиньте PDF-файл учебника.\n"
         "Другие файлы будут проигнорированы."
     )
 
@@ -115,7 +110,7 @@ async def add_book_meta(message: Message, state: FSMContext):
 async def add_book_pdf(message: Message, state: FSMContext):
     doc = message.document
     if not doc.file_name.lower().endswith(".pdf"):
-        await message.answer("Это не PDF. Скинь именно PDF-файл.")
+        await message.answer("Данный файл не является PDF")
         return
 
     data = await state.get_data()
@@ -127,7 +122,7 @@ async def add_book_pdf(message: Message, state: FSMContext):
     await message.bot.download_file(file.file_path, tmp.name)
     tmp.close()
 
-    user = await get_or_create_user(message)
+    user = await db.get_or_create_user(message)
 
     await message.answer(
         "📥 Начинаю обработку и загрузку учебника в базу данных...\n"
@@ -147,7 +142,7 @@ async def add_book_pdf(message: Message, state: FSMContext):
 @router.message(F.text == "🧠 Сгенерировать урок")
 async def lesson_start(message: Message, state: FSMContext):
     await state.clear()
-    user = await get_or_create_user(message)
+    user = await db.get_or_create_user(message)
 
     async with async_session() as session:
         stmt = select(Document).where(Document.user_id == user.id)
@@ -155,7 +150,7 @@ async def lesson_start(message: Message, state: FSMContext):
 
     if not docs:
         await message.answer(
-            "Сначала добавь хотя бы один учебник — нажми «➕ Добавить учебник»."
+            "У вас нет учебников. Нажмите «➕ Добавить учебник»."
         )
         return
 
@@ -185,9 +180,9 @@ async def lesson_topic(message: Message, state: FSMContext):
     doc_id = data.get("doc_id")
     await state.clear()
 
-    user = await get_or_create_user(message)
+    user = await db.get_or_create_user(message)
 
-    await message.answer("🧠 Генерирую урок, подожди ~30 секунд...")
+    await message.answer("🧠 Генерирую урок, подождите ~30 секунд...")
 
     result = await generate_lesson(
         topic=message.text,

@@ -11,3 +11,5 @@ ollama
 redis
 arq
 aiohttp-socks
+openai
+psycopg
