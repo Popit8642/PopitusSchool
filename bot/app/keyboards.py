@@ -4,19 +4,17 @@ from aiogram.types import (
 )
 
 
-main_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📚 Мои учебники"),
-         KeyboardButton(text="О боте")],
-        [KeyboardButton(text="➕ Добавить учебник")],
-        [KeyboardButton(text="🧠 Сгенерировать урок")],
-    ],
-    resize_keyboard=True,
+main_menu = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📚 Мои учебники"),
+                                           KeyboardButton(text="О боте")],
+                                          [KeyboardButton(text="➕ Добавить учебник")],
+                                          [KeyboardButton(text="🧠 Сгенерировать урок")]],
+                                        resize_keyboard=True,
 )
 
+cancel = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="cancel")]])
 
+# documents = [{"id": "...", "title": "...", "grade": "..."}, ...]
 def documents_keyboard(documents: list[dict]) -> InlineKeyboardMarkup:
-    """documents = [{"id": "...", "title": "...", "grade": "..."}, ...]"""
     buttons = [
         [InlineKeyboardButton(
             text=f"{d['title']} ({d['grade']})" if d.get("grade") else d["title"],

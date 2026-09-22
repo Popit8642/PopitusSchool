@@ -13,7 +13,7 @@ from database.database import async_session
 from database.models import User, Document
 from services.queue import enqueue_ingest
 from services.generator import generate_lesson
-from app.keyboards import main_menu, documents_keyboard
+import app.keyboards as kb
 import database.functions as db
 
 
@@ -34,7 +34,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await db.get_or_create_user(telegram_id=message.from_user.id, username=message.from_user.username)
     await message.answer(f"""Приветствую, {message.from_user.first_name}!\n
 Я — AI-методист, ваш персональный помощник по составлениям уроков.""",
-        reply_markup=main_menu,
+        reply_markup=kb.main_menu,
     )
 
 # ─── О боте ─────────────────────────────────────────
@@ -79,11 +79,11 @@ async def list_documents(message: Message, state: FSMContext):
 # ─── Добавить учебник ─────────────────────────────────────────
 @router.message(F.text == "➕ Добавить учебник")
 async def add_book_start(message: Message, state: FSMContext):
-    await db.get_or_create_user(message)
+    await db.get_or_create_user(telegram_id=message.from_user.id, username=message.from_user.username)
     await state.set_state(AddBook.waiting_meta)
     await message.answer("""Напишите данные учебника через запятую:
 Название, класс, авторы\n
-Пример: Алгебра, 7 класс, Юрий Клинских""",
+Пример: Алгебра, 7 класс, Юрий Клинских""", reply_markup=kb.cancel
     )
 
 
@@ -100,11 +100,14 @@ async def add_book_meta(message: Message, state: FSMContext):
 
     await state.update_data(title=title, grade=grade, author=author)
     await state.set_state(AddBook.waiting_pdf)
-    await message.answer(
-        "Теперь скиньте PDF-файл учебника.\n"
-        "Другие файлы будут проигнорированы."
+    await message.answer("""Теперь скиньте PDF-файл учебника.
+Другие файлы будут проигнорированы.""", reply_markup=kb.cancel
     )
 
+@router.callback_query(F.data == "cancel")
+async def cancel_waiting(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("Вы отменили действие.")
 
 @router.message(AddBook.waiting_pdf, F.document)
 async def add_book_pdf(message: Message, state: FSMContext):
@@ -122,7 +125,7 @@ async def add_book_pdf(message: Message, state: FSMContext):
     await message.bot.download_file(file.file_path, tmp.name)
     tmp.close()
 
-    user = await db.get_or_create_user(message)
+    user = await db.get_or_create_user(telegram_id=message.from_user.id, username=message.from_user.username)
 
     await message.answer(
         "📥 Начинаю обработку и загрузку учебника в базу данных...\n"
@@ -142,7 +145,7 @@ async def add_book_pdf(message: Message, state: FSMContext):
 @router.message(F.text == "🧠 Сгенерировать урок")
 async def lesson_start(message: Message, state: FSMContext):
     await state.clear()
-    user = await db.get_or_create_user(message)
+    user = await db.get_or_create_user(telegram_id=message.from_user.id, username=message.from_user.username)
 
     async with async_session() as session:
         stmt = select(Document).where(Document.user_id == user.id)
@@ -161,7 +164,7 @@ async def lesson_start(message: Message, state: FSMContext):
     await state.set_state(Lesson.waiting_doc)
     await message.answer(
         "По какому учебнику делать урок?",
-        reply_markup=documents_keyboard(docs_data),
+        reply_markup=kb.documents_keyboard(docs_data),
     )
 
 
@@ -180,7 +183,7 @@ async def lesson_topic(message: Message, state: FSMContext):
     doc_id = data.get("doc_id")
     await state.clear()
 
-    user = await db.get_or_create_user(message)
+    user = await db.get_or_create_user(telegram_id=message.from_user.id, username=message.from_user.username)
 
     await message.answer("🧠 Генерирую урок, подождите ~30 секунд...")
 
