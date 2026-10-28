@@ -24,8 +24,11 @@ async def enqueue_ingest(
     grade: str | None,
     author: str | None,
     telegram_id: int,
+    chat_id: int,
+    message_id: int,
 ):
     pool = await get_pool()
+    queue_size = await pool.zcard('arq:queue')
     await pool.enqueue_job(
         "ingest_pdf_task",
         pdf_path,
@@ -35,4 +38,8 @@ async def enqueue_ingest(
         grade,
         author,
         telegram_id,
+        chat_id,
+        message_id,
+        _job_id=f"ingest_{user_id}_{filename}",
     )
+    return queue_size

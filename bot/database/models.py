@@ -33,6 +33,7 @@ class Document(Base):
     author: Mapped[str | None] = mapped_column(String(255), nullable=True)
     filename: Mapped[str] = mapped_column(String(255))
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    is_completed: Mapped[bool] = mapped_column(Boolean, default=False)
 
     user: Mapped["User"] = relationship(back_populates="documents")
     chunks: Mapped[list["Chunk"]] = relationship(

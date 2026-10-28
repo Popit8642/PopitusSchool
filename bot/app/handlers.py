@@ -113,9 +113,14 @@ async def cancel_waiting(callback: CallbackQuery, state: FSMContext):
 async def add_book_pdf(message: Message, state: FSMContext):
     doc = message.document
     if not doc.file_name.lower().endswith(".pdf"):
-        await message.answer("Данный файл не является PDF")
+        await message.answer("Это не PDF. Скиньте именно PDF-файл.")
         return
 
+    if doc.file_size and doc.file_size > 20 * 1024 * 1024:
+        await message.answer("""❌ Файл слишком большой (больше 20 МБ).\n
+Официальный Telegram API не позволяет ботам скачивать такие файлы.
+Пожалуйста, сожмите PDF (например, на ilovepdf.com) и отправьте снова.""")
+        return
     data = await state.get_data()
     await state.clear()
 
@@ -127,10 +132,20 @@ async def add_book_pdf(message: Message, state: FSMContext):
 
     user = await db.get_or_create_user(telegram_id=message.from_user.id, username=message.from_user.username)
 
-    await message.answer(
-        "📥 Начинаю обработку и загрузку учебника в базу данных...\n"
-        "Это может занять несколько минут. Я напишу, когда закончу."
-    )
+    msg = await message.answer("📥 Начинаю обработку и загрузку учебника в базу данных...")
+    position = await enqueue_ingest(
+        pdf_path=tmp.name,
+        filename=doc.file_name,
+        user_id=user.id,
+        title=data["title"],
+        grade=data.get("grade"),
+        author=data.get("author"),
+        telegram_id=message.from_user.id,
+        chat_id=message.chat.id,
+        message_id=msg.message_id,)
+    if position > 1:
+        await msg.edit_text(f"""⏳ Ваш файл в очереди. Перед вами задач: {position - 1}.
+Я пришлю сообщение, когда начну обработку.""")
 
     await enqueue_ingest(
         pdf_path=tmp.name,
@@ -140,6 +155,8 @@ async def add_book_pdf(message: Message, state: FSMContext):
         grade=data.get("grade"),
         author=data.get("author"),
         telegram_id=message.from_user.id,
+        chat_id=message.chat.id,
+        message_id=msg.message_id,
     )
 
 @router.message(F.text == "🧠 Сгенерировать урок")

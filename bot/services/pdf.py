@@ -1,4 +1,5 @@
 import re
+import pymupdf
 import pymupdf4llm
 import pytesseract
 from pdf2image import convert_from_path
@@ -67,25 +68,38 @@ def _preprocess_for_ocr(image: Image.Image) -> Image.Image:
 
 
 def _ocr_pdf(pdf_path: str) -> list[dict]:
-    """OCR-обработка сканированного PDF."""
-    print("[ocr] PDF похож на сканы, запускаю OCR...")
-    images = convert_from_path(pdf_path, dpi=300)
-    print(f"[ocr] страниц: {len(images)}")
-
+    """OCR-обработка сканированного PDF по одной странице (экономит ОЗУ)."""
+    print("[ocr] PDF похож на сканы, запускаю постраничный OCR...")
+    doc = pymupdf.open(pdf_path)
     result: list[dict] = []
-    for i, image in enumerate(images, start=1):
-        processed = _preprocess_for_ocr(image)
-        text = pytesseract.image_to_string(processed, lang="rus+eng")
-
-        if not text.strip():
-            continue
-
-        for piece in split_text(text):
-            result.append({"page": i, "content": piece})
-
+    
+    for i, page in enumerate(doc, start=1):
+        # Рендерим ТОЛЬКО текущую страницу (не весь документ)
+        pix = page.get_pixmap(dpi=300)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        
+        # Предобработка
+        img = img.convert("L")
+        img = ImageEnhance.Contrast(img).enhance(2.0)
+        img = img.filter(ImageFilter.MedianFilter())
+        img = img.filter(ImageFilter.SHARPEN)
+        
+        # Распознаём
+        text = pytesseract.image_to_string(img, lang="rus+eng")
+        
+        # Сохраняем чанки со страницы
+        if text.strip():
+            for piece in split_text(text):
+                result.append({"page": i, "content": piece})
+                
         if i % 5 == 0:
-            print(f"[ocr] обработано страниц: {i}/{len(images)}")
-
+            print(f"[ocr] обработано страниц: {i}/{len(doc)}")
+        
+        # Освобождаем память сразу после страницы
+        del img
+        del pix
+        
+    doc.close()
     return result
 
 
