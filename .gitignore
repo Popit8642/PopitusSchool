@@ -6,6 +6,8 @@ env/
 # --- Секреты (ГЛАВНОЕ!) ---
 .env
 .env.*
+!.env.example
+!**/.env.example
 *.pem
 *.key
 
