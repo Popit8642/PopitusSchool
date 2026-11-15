@@ -61,6 +61,9 @@ class User(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_blocked: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     active_broadcast: Mapped[bool] = mapped_column(default=True, nullable=True)
     subscription_tier: Mapped[str] = mapped_column(
         String(8), default=TIER_FREE, server_default=TIER_FREE

@@ -10,6 +10,7 @@ MENU_TEXTS = {
     "📚 Мои учебники",
     "➕ Добавить учебник",
     "🧠 Сгенерировать урок",
+    "📝 Сгенерировать тест",
     "⚙️ Выбрать нейросеть",
     "💎 Купить Pro",
     "📞 Контакты",
@@ -23,7 +24,10 @@ def main_menu(tier: str = "free") -> ReplyKeyboardMarkup:
     """Главное меню: кнопка покупки Pro видна только Free-пользователям."""
     rows = [
         [KeyboardButton(text="📚 Мои учебники"), KeyboardButton(text="➕ Добавить учебник")],
-        [KeyboardButton(text="🧠 Сгенерировать урок")],
+        [
+            KeyboardButton(text="🧠 Сгенерировать урок"),
+            KeyboardButton(text="📝 Сгенерировать тест"),
+        ],
     ]
     if tier == "pro":
         rows.append([KeyboardButton(text="📞 Контакты")])
@@ -105,6 +109,69 @@ def documents_keyboard(documents: list[dict]) -> InlineKeyboardMarkup:
             ]
         )
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def quiz_documents_keyboard(documents: list[dict]) -> InlineKeyboardMarkup:
+    """Клавиатура выбора учебника для генерации теста."""
+    buttons = []
+    for document in documents:
+        grade = document.get("grade")
+        title = f"{document['title']} ({grade})" if grade else document["title"]
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=title[:60],
+                    callback_data=f"quiz_doc:{document['id']}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def lesson_actions_keyboard(lesson_id: int) -> InlineKeyboardMarkup:
+    """Действия после генерации урока."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📥 Скачать в Word",
+                    callback_data=f"lesson_docx:{lesson_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❓ Задать вопрос по уроку",
+                    callback_data=f"tutor_start:{lesson_id}",
+                )
+            ],
+        ]
+    )
+
+
+def quiz_answers_keyboard(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Показать ответы",
+                    callback_data=f"quiz_answers:{token}",
+                )
+            ]
+        ]
+    )
+
+
+def tutor_stop_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚫 Завершить диалог",
+                    callback_data="tutor_stop",
+                )
+            ]
+        ]
+    )
 
 
 def books_keyboard(documents: list[dict]) -> InlineKeyboardMarkup:

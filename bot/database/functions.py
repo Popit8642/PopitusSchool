@@ -80,6 +80,27 @@ async def is_admin(telegram_id: int) -> bool:
         return bool(user and user.is_admin)
 
 
+async def is_user_blocked(telegram_id: int) -> bool:
+    """Проверяет, заблокирован ли пользователь."""
+    async with async_session() as session:
+        stmt = select(User.is_blocked).where(User.telegram_id == telegram_id)
+        value = (await session.execute(stmt)).scalar_one_or_none()
+        return bool(value)
+
+
+async def set_user_blocked(telegram_id: int, blocked: bool) -> User | None:
+    """Блокирует или разблокирует пользователя. Возвращает обновлённую запись."""
+    async with async_session() as session:
+        stmt = select(User).where(User.telegram_id == telegram_id)
+        user = (await session.execute(stmt)).scalar_one_or_none()
+        if user is None:
+            return None
+        user.is_blocked = blocked
+        await session.commit()
+        await session.refresh(user)
+        return user
+
+
 async def ensure_admins(admin_ids: list[int]) -> None:
     """Выставляет флаг is_admin существующим пользователям из ADMIN_IDS."""
     if not admin_ids:
@@ -99,7 +120,10 @@ async def ensure_admins(admin_ids: list[int]) -> None:
 
 async def get_all_active_users() -> list[User]:
     async with async_session() as session:
-        stmt = select(User).where(User.active_broadcast == True)  # noqa: E712
+        stmt = select(User).where(
+            User.active_broadcast == True,  # noqa: E712
+            User.is_blocked == False,  # noqa: E712
+        )
         return list((await session.execute(stmt)).scalars().all())
 
 
@@ -124,7 +148,8 @@ async def count_users() -> tuple[int, int]:
         active = (
             await session.execute(
                 select(func.count(User.id)).where(
-                    User.active_broadcast == True  # noqa: E712
+                    User.active_broadcast == True,  # noqa: E712
+                    User.is_blocked == False,  # noqa: E712
                 )
             )
         ).scalar() or 0
@@ -515,6 +540,15 @@ async def save_lesson(
         return lesson
 
 
+async def get_user_lesson(lesson_id: int, user_id: int) -> Lesson | None:
+    """Возвращает урок, принадлежащий пользователю."""
+    async with async_session() as session:
+        stmt = select(Lesson).where(
+            Lesson.id == lesson_id, Lesson.user_id == user_id
+        )
+        return (await session.execute(stmt)).scalar_one_or_none()
+
+
 # ─── Статистика и рассылки ───────────────────────────────────────────────────
 async def get_admin_stats() -> dict[str, int]:
     async with async_session() as session:
@@ -524,7 +558,8 @@ async def get_admin_stats() -> dict[str, int]:
         active_users = (
             await session.execute(
                 select(func.count(User.id)).where(
-                    User.active_broadcast == True  # noqa: E712
+                    User.active_broadcast == True,  # noqa: E712
+                    User.is_blocked == False,  # noqa: E712
                 )
             )
         ).scalar() or 0
@@ -549,11 +584,19 @@ async def get_admin_stats() -> dict[str, int]:
                 select(func.count(User.id)).where(User.subscription_tier == TIER_PRO)
             )
         ).scalar() or 0
+        blocked_users = (
+            await session.execute(
+                select(func.count(User.id)).where(
+                    User.is_blocked == True  # noqa: E712
+                )
+            )
+        ).scalar() or 0
 
     return {
         "total_users": int(total_users),
         "active_users": int(active_users),
         "pro_users": int(pro_users),
+        "blocked_users": int(blocked_users),
         "documents": int(documents),
         "completed_documents": int(completed_documents),
         "chunks": int(chunks),

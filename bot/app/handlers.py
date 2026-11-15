@@ -9,7 +9,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.chat_action import ChatActionSender
 
 import app.keyboards as kb
@@ -23,9 +23,13 @@ from database.models import (
     TIER_FREE,
     TIER_PRO,
 )
+from services import context_store
+from services.docx_export import build_lesson_docx, docx_filename
 from services.formatting import build_html_parts, html_to_plain
 from services.generator import generate_lesson
 from services.queue import enqueue_ingest, get_queue_position
+from services.quiz import format_answers, format_quiz, generate_quiz, split_message
+from services.tutor import answer_question
 
 
 logger = logging.getLogger(__name__)
@@ -82,6 +86,16 @@ class Lesson(StatesGroup):
     waiting_topic = State()
 
 
+class Quiz(StatesGroup):
+    waiting_doc = State()
+    waiting_topic = State()
+    waiting_count = State()
+
+
+class TutorState(StatesGroup):
+    chatting = State()
+
+
 HELP_TEXT = """❓ <b>Помощь</b>
 
 Я — AI-методист. Помогаю готовить уроки по вашим учебникам.
@@ -97,6 +111,18 @@ HELP_TEXT = """❓ <b>Помощь</b>
 2. Выберите учебник.
 3. Введите тему урока.
 4. Получите конспект со структурой и страницами-источниками.
+5. Под уроком доступны кнопки «📥 Скачать в Word» и «❓ Задать вопрос по уроку».
+
+<b>Как сгенерировать тест:</b>
+1. Нажмите «📝 Сгенерировать тест».
+2. Выберите учебник и введите тему.
+3. Укажите количество вопросов (от 1 до 10).
+4. Получите тест с четырьмя вариантами ответа и кнопкой «Показать ответы».
+
+<b>Интерактивный репетитор:</b>
+• Нажмите «❓ Задать вопрос по уроку» под готовым конспектом.
+• Задавайте вопросы по тексту урока — репетитор ответит только по материалу урока.
+• Выйти можно кнопкой «🚫 Завершить диалог» или командой /start.
 
 <b>Полезно знать:</b>
 • Нейросеть можно выбрать в разделе «⚙️ Выбрать нейросеть».
@@ -204,6 +230,10 @@ def _books_text(documents: list[dict], total: int | None = None) -> str:
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
+    try:
+        await context_store.delete_tutor(message.from_user.id)
+    except Exception:
+        logger.debug("Не удалось очистить контекст репетитора", exc_info=True)
     user = await db.get_or_create_user(
         telegram_id=message.from_user.id, username=message.from_user.username
     )
@@ -807,7 +837,7 @@ async def lesson_topic(message: Message, state: FSMContext):
     model = await db.resolve_user_model(user)
     model_title = model.name if model else "нейросеть"
     status_message = await message.answer(
-        f"{model_title}🧠 Генерирую урок, подождите 1–2 минуты..."
+        f"🧠{model_title}: Генерирую урок, подождите 1–2 минуты..."
     )
 
     async with ChatActionSender.typing(
@@ -841,8 +871,9 @@ async def lesson_topic(message: Message, state: FSMContext):
     lesson = result["lesson"]
     sources = result.get("sources") or []
 
+    saved_lesson = None
     try:
-        await db.save_lesson(
+        saved_lesson = await db.save_lesson(
             user_id=user.id,
             document_id=document_id,
             document_title=document_title,
@@ -866,6 +897,12 @@ async def lesson_topic(message: Message, state: FSMContext):
     for part in parts:
         await _send_html_part(message, part)
 
+    if saved_lesson is not None:
+        await message.answer(
+            "Что можно сделать с уроком:",
+            reply_markup=kb.lesson_actions_keyboard(saved_lesson.id),
+        )
+
 
 @router.message(Lesson.waiting_topic, ~F.text.in_(kb.MENU_TEXTS))
 async def lesson_topic_wrong(message: Message):
@@ -873,6 +910,415 @@ async def lesson_topic_wrong(message: Message):
         "Пожалуйста, отправьте тему урока текстом или нажмите «Отмена».",
         reply_markup=kb.cancel,
     )
+
+
+# ─── Генерация теста ─────────────────────────────────────────────────────────
+@router.message(F.text == "📝 Сгенерировать тест")
+async def quiz_start(message: Message, state: FSMContext):
+    await state.clear()
+    user = await db.get_or_create_user(
+        telegram_id=message.from_user.id, username=message.from_user.username
+    )
+    documents = await db.get_user_documents_with_stats(user.id)
+    completed = [item for item in documents if item["status"] == DOC_COMPLETED]
+
+    if not completed:
+        if documents:
+            await message.answer(
+                "Ваши учебники ещё обрабатываются. Дождитесь статуса «✅ Готов»."
+            )
+        else:
+            await message.answer(
+                "У вас нет учебников. Нажмите «➕ Добавить учебник».",
+                reply_markup=kb.main_menu(user.subscription_tier or TIER_FREE),
+            )
+        return
+
+    await state.set_state(Quiz.waiting_doc)
+    await message.answer(
+        "Выберите учебник, по которому нужно составить тест:",
+        reply_markup=kb.quiz_documents_keyboard(completed[:10]),
+    )
+
+
+@router.callback_query(Quiz.waiting_doc, F.data.startswith("quiz_doc:"))
+async def quiz_document_chosen(callback: CallbackQuery, state: FSMContext):
+    document_id = callback.data.split(":", 1)[1]
+    user = await db.get_or_create_user(
+        telegram_id=callback.from_user.id, username=callback.from_user.username
+    )
+    document = await db.get_user_document(document_id, user.id)
+    if document is None or document.status != DOC_COMPLETED:
+        await callback.answer(
+            "Учебник не найден или ещё не готов.", show_alert=True
+        )
+        return
+
+    await state.update_data(doc_id=str(document.id), doc_title=document.title)
+    await state.set_state(Quiz.waiting_topic)
+    await _edit_or_answer(
+        callback,
+        f"Учебник: «{document.title}».\n\n"
+        "Введите тему теста. Например: «Линейные уравнения».",
+        kb.cancel,
+    )
+    await callback.answer()
+
+
+@router.message(Quiz.waiting_topic, F.text, ~F.text.in_(kb.MENU_TEXTS))
+async def quiz_topic(message: Message, state: FSMContext):
+    topic = message.text.strip()
+    if len(topic) < 2 or len(topic) > 300:
+        await message.answer(
+            "Тема должна быть от 2 до 300 символов. Попробуйте ещё раз.",
+            reply_markup=kb.cancel,
+        )
+        return
+
+    await state.update_data(topic=topic)
+    await state.set_state(Quiz.waiting_count)
+    await message.answer(
+        "Сколько вопросов составить?\n"
+        "Введите число от 1 до 10.",
+        reply_markup=kb.cancel,
+    )
+
+
+@router.message(Quiz.waiting_count, F.text, ~F.text.in_(kb.MENU_TEXTS))
+async def quiz_count(message: Message, state: FSMContext):
+    raw = message.text.strip()
+    if not raw.isdigit() or not 1 <= int(raw) <= 10:
+        await message.answer(
+            "Введите целое число от 1 до 10.",
+            reply_markup=kb.cancel,
+        )
+        return
+
+    count = int(raw)
+    data = await state.get_data()
+    document_id = data.get("doc_id")
+    document_title = data.get("doc_title")
+    topic = data.get("topic")
+    if not document_id or not topic:
+        await state.clear()
+        user = await db.get_or_create_user(
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+        )
+        await message.answer(
+            "Не удалось определить учебник или тему. Начните заново.",
+            reply_markup=kb.main_menu(user.subscription_tier or TIER_FREE),
+        )
+        return
+
+    await state.clear()
+    user = await db.get_or_create_user(
+        telegram_id=message.from_user.id, username=message.from_user.username
+    )
+    model = await db.resolve_user_model(user)
+    model_title = model.name if model else "нейросеть"
+    status_message = await message.answer(
+        f"📝 {model_title}: составляю тест, подождите 1–2 минуты..."
+    )
+
+    async with ChatActionSender.typing(
+        bot=message.bot, chat_id=message.chat.id
+    ):
+        result = await generate_quiz(
+            topic=topic,
+            user_id=user.id,
+            document_id=document_id,
+            count=count,
+            document_title=document_title,
+            model_tag=model.ollama_tag if model else None,
+        )
+
+    error = result.get("error")
+    if error == "timeout":
+        await _update_status(
+            status_message, "⏳ Нейросеть задумалась, попробуйте позже."
+        )
+        return
+    if error == "not_found":
+        await _update_status(
+            status_message,
+            "🔍 Не нашёл информации по этой теме в выбранном учебнике. "
+            "Попробуйте другую формулировку.",
+        )
+        return
+    if error == "format":
+        await _update_status(
+            status_message,
+            "❌ Не удалось разобрать тест. Попробуйте ещё раз.",
+        )
+        return
+    if error or not result.get("questions"):
+        await _update_status(
+            status_message,
+            "❌ Произошла ошибка при генерации теста, попробуйте позже.",
+        )
+        return
+
+    questions = result["questions"]
+    await _update_status(status_message, "✅ Тест готов.")
+
+    quiz_text = format_quiz(topic, questions, document_title)
+    for part in split_message(quiz_text):
+        await message.answer(part)
+
+    token = context_store.new_token()
+    try:
+        await context_store.save_quiz(
+            token,
+            {
+                "telegram_id": message.from_user.id,
+                "topic": topic,
+                "questions": questions,
+            },
+        )
+    except Exception:
+        logger.exception("Не удалось сохранить тест в Redis")
+        await message.answer(
+            "⚠️ Ответы сейчас недоступны: сервис хранения временно не работает. "
+            "Тест можно использовать и без кнопки «Показать ответы»."
+        )
+        return
+
+    await message.answer(
+        "Когда будете готовы, откройте правильные ответы:",
+        reply_markup=kb.quiz_answers_keyboard(token),
+    )
+
+
+@router.callback_query(F.data.startswith("quiz_answers:"))
+async def quiz_show_answers(callback: CallbackQuery):
+    token = callback.data.split(":", 1)[1]
+    try:
+        payload = await context_store.load_quiz(token)
+    except Exception:
+        logger.exception("Не удалось прочитать тест из Redis")
+        await callback.answer(
+            "Сервис ответов временно недоступен.", show_alert=True
+        )
+        return
+
+    if payload is None:
+        await callback.answer(
+            "Ответы устарели. Сгенерируйте тест заново.", show_alert=True
+        )
+        return
+    if payload.get("telegram_id") != callback.from_user.id:
+        await callback.answer("Это чужой тест.", show_alert=True)
+        return
+
+    questions = payload.get("questions") or []
+    if not questions:
+        await callback.answer("Ответы не найдены.", show_alert=True)
+        return
+
+    text = format_answers(questions)
+    try:
+        await callback.message.edit_text(text)
+    except TelegramBadRequest:
+        await callback.message.answer(text)
+    await callback.answer("Правильные ответы")
+
+
+# ─── Экспорт урока в Word ────────────────────────────────────────────────────
+@router.callback_query(F.data.startswith("lesson_docx:"))
+async def lesson_export_docx(callback: CallbackQuery, state: FSMContext):
+    raw_id = callback.data.split(":", 1)[1]
+    if not raw_id.isdigit():
+        await callback.answer("Некорректный урок.", show_alert=True)
+        return
+
+    user = await db.get_or_create_user(
+        telegram_id=callback.from_user.id, username=callback.from_user.username
+    )
+    lesson = await db.get_user_lesson(int(raw_id), user.id)
+    if lesson is None:
+        await callback.answer("Урок не найден.", show_alert=True)
+        return
+
+    try:
+        data = build_lesson_docx(
+            topic=lesson.topic,
+            content=lesson.content,
+            document_title=lesson.document_title,
+            sources=lesson.sources,
+        )
+    except Exception:
+        logger.exception("Не удалось собрать DOCX для урока %s", lesson.id)
+        await callback.answer(
+            "Не удалось подготовить файл. Попробуйте позже.", show_alert=True
+        )
+        return
+
+    filename = docx_filename(lesson.topic, lesson.id)
+    try:
+        await callback.bot.send_document(
+            chat_id=callback.message.chat.id,
+            document=BufferedInputFile(data, filename=filename),
+            caption=f"📄 Урок «{lesson.topic}» в Word",
+        )
+    except TelegramAPIError:
+        logger.exception("Не удалось отправить DOCX урока %s", lesson.id)
+        await callback.answer(
+            "Не удалось отправить файл. Попробуйте позже.", show_alert=True
+        )
+        return
+    await callback.answer("Файл отправлен")
+
+
+# ─── Интерактивный репетитор ─────────────────────────────────────────────────
+@router.callback_query(F.data.startswith("tutor_start:"))
+async def tutor_start(callback: CallbackQuery, state: FSMContext):
+    raw_id = callback.data.split(":", 1)[1]
+    if not raw_id.isdigit():
+        await callback.answer("Некорректный урок.", show_alert=True)
+        return
+
+    user = await db.get_or_create_user(
+        telegram_id=callback.from_user.id, username=callback.from_user.username
+    )
+    lesson = await db.get_user_lesson(int(raw_id), user.id)
+    if lesson is None:
+        await callback.answer("Урок не найден.", show_alert=True)
+        return
+
+    payload = {
+        "lesson_id": lesson.id,
+        "topic": lesson.topic,
+        "document_title": lesson.document_title,
+        "content": lesson.content,
+        "history": [],
+    }
+    try:
+        await context_store.save_tutor(user.telegram_id, payload)
+    except Exception:
+        logger.exception("Не удалось сохранить контекст репетитора")
+        await callback.answer(
+            "Сервис диалога временно недоступен. Попробуйте позже.",
+            show_alert=True,
+        )
+        return
+
+    await state.clear()
+    await state.set_state(TutorState.chatting)
+    await callback.message.answer(
+        f"❓ <b>Репетитор по уроку «{escape(lesson.topic)}»</b>\n\n"
+        "Задайте вопрос по материалу этого урока. Я отвечу, опираясь только "
+        "на его текст.\n\n"
+        "Выйти можно кнопкой «🚫 Завершить диалог» или командой /start.",
+        parse_mode="HTML",
+        reply_markup=kb.tutor_stop_keyboard(),
+    )
+    await callback.answer("Режим репетитора включён")
+
+
+@router.message(TutorState.chatting, F.text, ~F.text.in_(kb.MENU_TEXTS))
+async def tutor_question(message: Message, state: FSMContext):
+    question = message.text.strip()
+    if len(question) < 2:
+        await message.answer(
+            "Напишите вопрос подробнее.",
+            reply_markup=kb.tutor_stop_keyboard(),
+        )
+        return
+    if len(question) > 1000:
+        await message.answer(
+            "Вопрос слишком длинный (максимум 1000 символов).",
+            reply_markup=kb.tutor_stop_keyboard(),
+        )
+        return
+
+    try:
+        context = await context_store.load_tutor(message.from_user.id)
+    except Exception:
+        logger.exception("Не удалось прочитать контекст репетитора")
+        context = None
+
+    if context is None:
+        await state.clear()
+        user = await db.get_or_create_user(
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+        )
+        await message.answer(
+            "Сессия репетитора истекла. Откройте урок и нажмите "
+            "«❓ Задать вопрос по уроку» заново.",
+            reply_markup=kb.main_menu(user.subscription_tier or TIER_FREE),
+        )
+        return
+
+    user = await db.get_or_create_user(
+        telegram_id=message.from_user.id, username=message.from_user.username
+    )
+    model = await db.resolve_user_model(user)
+    status_message = await message.answer("🤔 Думаю над ответом...")
+
+    async with ChatActionSender.typing(
+        bot=message.bot, chat_id=message.chat.id
+    ):
+        result = await answer_question(
+            context,
+            question,
+            model_tag=model.ollama_tag if model else None,
+        )
+
+    if result.get("error") == "timeout":
+        await _update_status(
+            status_message, "⏳ Нейросеть задумалась, попробуйте позже."
+        )
+        return
+    if result.get("error") or not result.get("answer"):
+        await _update_status(
+            status_message,
+            "❌ Не удалось получить ответ. Попробуйте ещё раз.",
+        )
+        return
+
+    answer = result["answer"]
+    try:
+        await status_message.delete()
+    except TelegramAPIError:
+        pass
+
+    parts = build_html_parts(answer)
+    for part in parts:
+        await _send_html_part(message, part)
+
+    history = list(context.get("history") or [])
+    history.append({"q": question, "a": answer})
+    context["history"] = history[-6:]
+    try:
+        await context_store.save_tutor(message.from_user.id, context)
+    except Exception:
+        logger.exception("Не удалось обновить контекст репетитора")
+
+    await message.answer(
+        "Можно задать следующий вопрос или завершить диалог.",
+        reply_markup=kb.tutor_stop_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "tutor_stop")
+async def tutor_stop(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await context_store.delete_tutor(callback.from_user.id)
+    except Exception:
+        logger.exception("Не удалось очистить контекст репетитора")
+
+    await _edit_or_answer(callback, "🚫 Диалог с репетитором завершён.")
+    user = await db.get_or_create_user(
+        telegram_id=callback.from_user.id, username=callback.from_user.username
+    )
+    await callback.message.answer(
+        "Возвращайтесь, когда захотите разобрать ещё один урок.",
+        reply_markup=kb.main_menu(user.subscription_tier or TIER_FREE),
+    )
+    await callback.answer("Диалог завершён")
 
 
 # ─── Fallback ────────────────────────────────────────────────────────────────

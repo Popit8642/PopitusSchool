@@ -13,3 +13,4 @@ redis
 arq
 aiohttp-socks
 openai
+python-docx

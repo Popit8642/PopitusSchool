@@ -6,6 +6,7 @@ from aiogram.types import BotCommand, ErrorEvent
 
 from app.admin import admin_router
 from app.handlers import router
+from app.middlewares import BlockedUserMiddleware
 from app.payments import payments_router
 from bot_factory import create_bot
 from config import settings
@@ -73,6 +74,12 @@ async def main() -> None:
     setup_logging()
     bot = create_bot()
     dp = Dispatcher()
+
+    blocked_middleware = BlockedUserMiddleware()
+    dp.message.outer_middleware(blocked_middleware)
+    dp.callback_query.outer_middleware(blocked_middleware)
+    dp.pre_checkout_query.outer_middleware(blocked_middleware)
+
     dp.include_router(admin_router)
     dp.include_router(payments_router)
     dp.include_router(router)

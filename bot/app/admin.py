@@ -40,12 +40,17 @@ class SubscriptionState(StatesGroup):
     waiting_identifier = State()
 
 
+class BlockState(StatesGroup):
+    waiting_identifier = State()
+
+
 def admin_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
             [InlineKeyboardButton(text="🧠 Нейросети", callback_data="models")],
             [InlineKeyboardButton(text="👑 Подписки", callback_data="subscriptions")],
+            [InlineKeyboardButton(text="🚫 Блокировки", callback_data="blocks")],
             [InlineKeyboardButton(text="📢 Рассылка", callback_data="broadcast")],
         ]
     )
@@ -135,6 +140,16 @@ def subscriptions_panel() -> InlineKeyboardMarkup:
     )
 
 
+def blocks_panel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🚫 Заблокировать", callback_data="block_user")],
+            [InlineKeyboardButton(text="✅ Разблокировать", callback_data="unblock_user")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_panel")],
+        ]
+    )
+
+
 def cancel_state_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -215,6 +230,7 @@ async def process_stats(callback: CallbackQuery):
         "📊 <b>Статистика</b>\n\n"
         f"👥 Всего пользователей: <b>{stats['total_users']}</b>\n"
         f"👑 Pro-подписок: <b>{stats['pro_users']}</b>\n"
+        f"🚫 Заблокировано: <b>{stats['blocked_users']}</b>\n"
         f"📬 Активных для рассылки: <b>{stats['active_users']}</b>\n\n"
         f"📚 Учебников: <b>{stats['documents']}</b>\n"
         f"✅ Готовых учебников: <b>{stats['completed_documents']}</b>\n"
@@ -621,5 +637,146 @@ async def process_subscription_identifier(
     )
     await message.answer(
         f"✅ {action_text} для {handle} (ID {target.telegram_id}).\n{note}",
+        reply_markup=back_menu(),
+    )
+
+
+# ─── Блокировки ──────────────────────────────────────────────────────────────
+@admin_router.callback_query(F.data == "blocks")
+async def process_blocks(callback: CallbackQuery, state: FSMContext):
+    if not await db.is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await _safe_edit(
+        callback.message,
+        "🚫 <b>Блокировки</b>\n\n"
+        "Заблокированный пользователь не может пользоваться ботом: "
+        "его сообщения и нажатия кнопок игнорируются.\n\n"
+        "Можно указать Telegram ID или @username.",
+        blocks_panel(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.in_({"block_user", "unblock_user"}))
+async def process_block_action(callback: CallbackQuery, state: FSMContext):
+    if not await db.is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    action = "block" if callback.data == "block_user" else "unblock"
+    await state.set_state(BlockState.waiting_identifier)
+    await state.update_data(block_action=action)
+    if action == "block":
+        text = (
+            "🚫 <b>Блокировка пользователя</b>\n\n"
+            "Введите Telegram ID или @username."
+        )
+    else:
+        text = (
+            "✅ <b>Разблокировка пользователя</b>\n\n"
+            "Введите Telegram ID или @username."
+        )
+    await _safe_edit(callback.message, text, cancel_state_menu(), parse_mode="HTML")
+    await callback.answer()
+
+
+@admin_router.message(BlockState.waiting_identifier, _is_plain_text)
+async def process_block_identifier(message: Message, state: FSMContext):
+    if not await db.is_admin(message.from_user.id):
+        await message.answer("Нет доступа.")
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    action = data.get("block_action")
+    if action not in ("block", "unblock"):
+        await state.clear()
+        await message.answer(
+            "Не удалось определить действие. Откройте «🚫 Блокировки» заново.",
+            reply_markup=back_menu(),
+        )
+        return
+
+    identifier = (message.text or "").strip()
+    if not identifier or len(identifier) > 64:
+        await message.answer(
+            "Введите Telegram ID (число) или @username.",
+            reply_markup=cancel_state_menu(),
+        )
+        return
+
+    target = await db.find_user_by_identifier(identifier)
+    if target is None:
+        await message.answer(
+            "Пользователь не найден. Проверьте ID или @username — "
+            "он должен хотя бы раз написать боту.",
+            reply_markup=cancel_state_menu(),
+        )
+        return
+
+    if action == "block" and target.is_admin:
+        await message.answer(
+            "Нельзя заблокировать администратора.",
+            reply_markup=blocks_panel(),
+        )
+        await state.clear()
+        return
+
+    blocked = action == "block"
+    updated = await db.set_user_blocked(target.telegram_id, blocked)
+    if updated is None:
+        await message.answer(
+            "Не удалось обновить пользователя. Попробуйте ещё раз.",
+            reply_markup=blocks_panel(),
+        )
+        await state.clear()
+        return
+
+    await state.clear()
+
+    notified = True
+    if blocked:
+        notify_text = (
+            "🚫 Доступ к боту ограничен администратором.\n\n"
+            "Если вы считаете это ошибкой, свяжитесь с поддержкой: "
+            "«📞 Контакты»."
+        )
+    else:
+        notify_text = "✅ Доступ к боту восстановлен. Можете продолжать работу."
+
+    try:
+        await message.bot.send_message(
+            chat_id=target.telegram_id,
+            text=notify_text,
+            reply_markup=(
+                None
+                if blocked
+                else kb.main_menu(target.subscription_tier or TIER_FREE)
+            ),
+        )
+    except TelegramForbiddenError:
+        notified = False
+        logger.info(
+            "Пользователь %s заблокировал бота, уведомление не отправлено",
+            target.telegram_id,
+        )
+    except TelegramAPIError:
+        notified = False
+        logger.exception(
+            "Не удалось отправить уведомление о блокировке %s", target.telegram_id
+        )
+
+    handle = f"@{target.username}" if target.username else str(target.telegram_id)
+    action_text = "заблокирован" if blocked else "разблокирован"
+    note = (
+        "Уведомление отправлено."
+        if notified
+        else "Уведомление не отправлено: бот заблокирован или ошибка Telegram."
+    )
+    await message.answer(
+        f"✅ Пользователь {handle} (ID {target.telegram_id}) {action_text}.\n{note}",
         reply_markup=back_menu(),
     )
