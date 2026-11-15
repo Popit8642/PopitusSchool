@@ -14,6 +14,10 @@ class PdfNoTextError(PdfError):
     """В PDF не удалось найти ни текста, ни распознаваемых изображений."""
 
 
+class UnsafeContentError(AppError):
+    """Содержимое документа не прошло модерацию."""
+
+
 class IngestCancelledError(AppError):
     """Обработка документа отменена (например, документ удалён)."""
 

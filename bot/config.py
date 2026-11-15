@@ -45,8 +45,13 @@ class Settings(BaseSettings):
     RAG_MAX_DISTANCE: float = 0.7
 
     MAX_PDF_SIZE_MB: int = 20
+    MIN_PDF_SIZE_KB: int = 10
     OCR_LANG: str = "rus+eng"
     INGEST_JOB_TIMEOUT_SECONDS: int = 3600
+
+    MODERATION_MODEL: str = "qwen2.5:3b-instruct-q4_K_M"
+    MODERATION_TIMEOUT_SECONDS: int = 60
+    MODERATION_MAX_CHARS: int = 2000
 
     PRO_PRICE_STARS: int = 100
 

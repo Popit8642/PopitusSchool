@@ -16,7 +16,7 @@ from database.functions import (
     set_document_status,
 )
 from database.models import DOC_COMPLETED, DOC_FAILED, DOC_PENDING
-from errors import IngestCancelledError, PdfError
+from errors import IngestCancelledError, PdfError, UnsafeContentError
 from logging_setup import setup_logging
 from services.ingest import ingest_document
 from services.queue import (
@@ -99,6 +99,17 @@ async def process_document_task(ctx, document_id: str):
 
     try:
         stats = await ingest_document(document["id"])
+    except UnsafeContentError:
+        logger.info("Документ %s отклонён модерацией", document_id)
+        _delete_source(document)
+        await _notify(
+            document,
+            "❌ Загрузка отклонена. Текст в этом файле не похож на учебный "
+            "материал. Пожалуйста, загружайте только школьные учебники "
+            "и методички.",
+            bot,
+        )
+        return
     except PdfError:
         logger.exception("Ошибка распознавания PDF %s", document_id)
         await _notify(

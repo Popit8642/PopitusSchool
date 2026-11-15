@@ -1,4 +1,5 @@
 import logging
+import re
 import uuid
 from html import escape
 from pathlib import Path
@@ -29,6 +30,44 @@ from services.queue import enqueue_ingest, get_queue_position
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+
+# Быстрый фильтр по имени файла: такие названия отклоняем до скачивания.
+_BLOCKED_NAME_RE = re.compile(
+    r"\b(porn\w*|sex\w*|x{3,}\w*|nude\w*|erotic\w*|hentai|onlyfans|"
+    r"escort\w*|milf|nsfw)\b",
+    re.IGNORECASE,
+)
+_BLOCKED_NAME_PARTS = (
+    "порн",
+    "секс",
+    "эротик",
+    "интим",
+    "обнаж",
+    "голые",
+    "голая",
+    "голое",
+    "голых",
+    "голым",
+    "18+",
+    "для взрослых",
+)
+_SEPARATORS_RE = re.compile(r"[_\-.]+")
+BLOCKED_FILE_TEXT = (
+    "❌ Файл заблокирован системой безопасности. "
+    "Загружайте только учебные материалы"
+)
+
+
+def _is_unsafe_filename(name: str) -> bool:
+    lowered = name.casefold()
+    if _BLOCKED_NAME_RE.search(lowered):
+        return True
+    normalized = _SEPARATORS_RE.sub(" ", lowered)
+    return any(
+        part in lowered or part in normalized
+        for part in _BLOCKED_NAME_PARTS
+    )
 
 
 class AddBook(StatesGroup):
@@ -516,6 +555,24 @@ async def add_book_pdf(message: Message, state: FSMContext):
         )
         return
 
+    if _is_unsafe_filename(file_name):
+        logger.warning(
+            "Заблокировано имя файла: user=%s file=%r",
+            message.from_user.id,
+            file_name,
+        )
+        await message.answer(BLOCKED_FILE_TEXT, reply_markup=kb.cancel)
+        return
+
+    min_size = settings.MIN_PDF_SIZE_KB * 1024
+    if document.file_size is not None and document.file_size < min_size:
+        await message.answer(
+            f"❌ Файл слишком маленький (меньше {settings.MIN_PDF_SIZE_KB} КБ). "
+            "Похоже, это пустышка или мусор. Загрузите нормальный PDF.",
+            reply_markup=kb.cancel,
+        )
+        return
+
     if (
         document.file_size is not None
         and document.file_size > settings.MAX_PDF_SIZE_BYTES
@@ -563,10 +620,19 @@ async def add_book_pdf(message: Message, state: FSMContext):
         return
 
     try:
-        if path.stat().st_size > settings.MAX_PDF_SIZE_BYTES:
+        downloaded_size = path.stat().st_size
+        if downloaded_size > settings.MAX_PDF_SIZE_BYTES:
             path.unlink(missing_ok=True)
             await message.answer(
                 "❌ Файл слишком большой (больше 20 МБ). Сожмите PDF и попробуйте снова.",
+                reply_markup=kb.cancel,
+            )
+            return
+        if downloaded_size < settings.MIN_PDF_SIZE_KB * 1024:
+            path.unlink(missing_ok=True)
+            await message.answer(
+                f"❌ Файл слишком маленький (меньше {settings.MIN_PDF_SIZE_KB} КБ). "
+                "Похоже, это пустышка или мусор. Загрузите нормальный PDF.",
                 reply_markup=kb.cancel,
             )
             return
@@ -741,7 +807,7 @@ async def lesson_topic(message: Message, state: FSMContext):
     model = await db.resolve_user_model(user)
     model_title = model.name if model else "нейросеть"
     status_message = await message.answer(
-        f"🧠 Генерирую урок ({model_title}), подождите 1–2 минуты..."
+        f"{model_title}🧠 Генерирую урок, подождите 1–2 минуты..."
     )
 
     async with ChatActionSender.typing(

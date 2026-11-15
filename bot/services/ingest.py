@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 import uuid
@@ -8,12 +9,34 @@ from sqlalchemy import delete, func, select
 from config import settings
 from database.database import async_session
 from database.models import DOC_COMPLETED, DOC_FAILED, DOC_PROCESSING, Chunk, Document
-from errors import IngestCancelledError, PdfUnreadableError
+from errors import (
+    IngestCancelledError,
+    PdfNoTextError,
+    PdfUnreadableError,
+    UnsafeContentError,
+)
 from services.embeddings import get_embeddings
+from services.llm_client import chat_completion
 from services.pdf import extract_and_chunk
 
 
 logger = logging.getLogger(__name__)
+
+MODERATION_PROMPT = (
+    "Ты — модератор. Проанализируй текст. Ответь ОДНИМ СЛОВОМ: «ОК», если это "
+    "научный, учебный, образовательный или информационный текст. Ответь «БЛОК», "
+    "если это порнография, спам, бессмыслица, оскорбления или текст, который "
+    "не имеет отношения к учёбе."
+)
+_BLOCK_MARKERS = (
+    "блок",
+    "block",
+    "запрет",
+    "недопуст",
+    "unsafe",
+    "nsfw",
+)
+_MODERATION_CHUNKS = 5
 
 
 def _as_uuid(value: str | uuid.UUID) -> uuid.UUID | None:
@@ -50,6 +73,89 @@ async def _clear_chunks(document_id: uuid.UUID) -> None:
             delete(Chunk).where(Chunk.document_id == document_id)
         )
         await session.commit()
+
+
+async def _delete_document(document_id: uuid.UUID) -> None:
+    """Удаляет документ вместе с чанками (для отклонённого контента)."""
+    try:
+        async with async_session() as session:
+            document = await session.get(Document, document_id)
+            if document is None:
+                return
+            await session.execute(
+                delete(Chunk).where(Chunk.document_id == document_id)
+            )
+            await session.delete(document)
+            await session.commit()
+    except Exception:
+        logger.exception("Не удалось удалить отклонённый документ %s", document_id)
+
+
+def _remove_source(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.exception("Не удалось удалить файл %s", path)
+
+
+def _moderation_sample(chunks: list[dict]) -> str:
+    """Первые 3–5 чанков, но не больше MODERATION_MAX_CHARS символов."""
+    parts: list[str] = []
+    total = 0
+    for chunk in chunks[:_MODERATION_CHUNKS]:
+        content = (chunk.get("content") or "").strip()
+        if not content:
+            continue
+        remaining = settings.MODERATION_MAX_CHARS - total
+        if remaining <= 0:
+            break
+        parts.append(content[:remaining])
+        total += len(parts[-1])
+    return "\n\n".join(parts).strip()
+
+
+def _is_blocked_verdict(answer: str) -> bool:
+    """Блокируем только при явном вердикте модератора (иначе fail-open)."""
+    normalized = (answer or "").casefold()
+    return any(marker in normalized for marker in _BLOCK_MARKERS)
+
+
+async def _moderate(chunks: list[dict], document_id: uuid.UUID) -> None:
+    """Проверяет начало документа локальной LLM. Fail-open при сбоях."""
+    sample = _moderation_sample(chunks)
+    if not sample:
+        return
+
+    messages = [
+        {"role": "system", "content": MODERATION_PROMPT},
+        {"role": "user", "content": f"Текст для проверки:\n\n{sample}"},
+    ]
+    try:
+        answer = await asyncio.wait_for(
+            chat_completion(
+                messages,
+                temperature=0.0,
+                model=settings.MODERATION_MODEL,
+            ),
+            timeout=settings.MODERATION_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[ingest] модерация %s недоступна (%s: %s) — пропускаю документ",
+            document_id,
+            type(exc).__name__,
+            exc,
+        )
+        return
+
+    verdict = (answer or "").strip()
+    logger.info(
+        "[ingest] модерация %s: %r", document_id, verdict[:120]
+    )
+    if _is_blocked_verdict(verdict):
+        raise UnsafeContentError(
+            f"Модерация отклонила содержимое: {verdict[:120]}"
+        )
 
 
 async def _mark_failed(document_id: uuid.UUID, error: str) -> None:
@@ -103,9 +209,23 @@ async def ingest_document(document_id: str | uuid.UUID) -> dict[str, int]:
 
     try:
         chunks = extract_and_chunk(str(path))
+    except PdfNoTextError as exc:
+        logger.info("[ingest] в PDF %s не найден текст — отклоняю", uid)
+        await _delete_document(uid)
+        _remove_source(path)
+        raise UnsafeContentError("В документе нет распознаваемого текста") from exc
     except Exception as exc:
         logger.exception("[ingest] не удалось разобрать PDF %s", uid)
         await _mark_failed(uid, str(exc))
+        raise
+
+    try:
+        await _moderate(chunks, uid)
+    except UnsafeContentError:
+        logger.warning("[ingest] документ %s отклонён модерацией", uid)
+        await _clear_chunks(uid)
+        await _delete_document(uid)
+        _remove_source(path)
         raise
 
     pages_count = len({chunk["page"] for chunk in chunks})
