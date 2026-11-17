@@ -31,7 +31,6 @@ async def on_startup(bot: Bot) -> None:
             [
                 BotCommand(command="start", description="Запустить бота"),
                 BotCommand(command="help", description="Помощь"),
-                BotCommand(command="admin_panel", description="Админ-панель"),
             ]
         )
     except Exception:
